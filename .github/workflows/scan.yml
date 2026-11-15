@@ -1,0 +1,54 @@
+name: Day Trader Scanner
+
+on:
+  workflow_dispatch:
+    inputs:
+      telegram_test:
+        description: Send only a Telegram test message
+        type: boolean
+        default: true
+  schedule:
+    - cron: '32,37,42,47,52,57 9 * * 1-5'
+      timezone: America/New_York
+    - cron: '2-57/5 10-15 * * 1-5'
+      timezone: America/New_York
+
+permissions:
+  contents: read
+
+concurrency:
+  group: day-trader-scanner
+  cancel-in-progress: false
+
+jobs:
+  scanner:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    env:
+      APCA_API_KEY_ID: ${{ secrets.APCA_API_KEY_ID }}
+      APCA_API_SECRET_KEY: ${{ secrets.APCA_API_SECRET_KEY }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      USD_PER_EUR: ${{ vars.USD_PER_EUR }}
+      ALPACA_FEED: iex
+      SIGNAL_MAX_AGE_SECONDS: '420'
+      STATE_DB: .scanner/alerts.sqlite3
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test Telegram
+        if: github.event_name == 'workflow_dispatch' && inputs.telegram_test
+        run: python3 bot.py --telegram-test
+      - name: Get session date
+        id: day
+        if: github.event_name != 'workflow_dispatch' || !inputs.telegram_test
+        run: echo "date=$(TZ=America/New_York date +%F)" >> "$GITHUB_OUTPUT"
+      - name: Restore sent alert history
+        if: steps.day.outputs.date != ''
+        uses: actions/cache@v4
+        with:
+          path: .scanner/alerts.sqlite3
+          key: scanner-v1-${{ steps.day.outputs.date }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: scanner-v1-${{ steps.day.outputs.date }}-
+      - name: Scan once
+        if: steps.day.outputs.date != ''
+        run: python3 live.py --once
