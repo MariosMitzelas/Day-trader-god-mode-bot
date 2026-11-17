@@ -120,6 +120,7 @@ def deliver(plans, db, args, dry_run, now):
     for plan, latest in plans:
         key = plan.symbol, plan.signal_time, plan.trigger, plan.stop, plan.max_entry
         groups.setdefault(key, []).append((plan, latest))
+    sent = 0
     for key, matches in groups.items():
         identifier = repr(key)
         message = alert([plan for plan, _ in matches], matches[0][1], now, args)
@@ -130,6 +131,8 @@ def deliver(plans, db, args, dry_run, now):
             with db:
                 db.execute("INSERT INTO sent VALUES (?)", (identifier,))
             log.info("Alert delivered for %s (%s)", key[0], key[1])
+            sent += 1
+    return sent
 
 
 def main():
@@ -169,8 +172,19 @@ def main():
                     # Wait a few seconds after each minute for the aggregate to arrive.
                     cutoff = (now - timedelta(seconds=5)).replace(second=0, microsecond=0)
                     bars = fetch_bars(args, cutoff)
+                    bar_count = sum(map(len, bars.values()))
+                    latest = max((items[-1].stamp for items in bars.values() if items),
+                                 default=None)
+                    log.info("Alpaca bars: %d across %d/%d symbols; latest ET: %s",
+                             bar_count, sum(bool(items) for items in bars.values()),
+                             len(args.symbols), latest.isoformat() if latest else "none")
                     plans = recent_plans(bars, *session, now, args)
-                    deliver(plans, db, args, cli.dry_run, now)
+                    log.info("Eligible recent setups: %d", len(plans))
+                    sent = deliver(plans, db, args, cli.dry_run, now)
+                    log.info("Telegram alerts delivered: %d%s", sent,
+                             " (dry run)" if cli.dry_run else "")
+                else:
+                    log.info("Outside regular session; market-data scan skipped.")
                 if cli.once:
                     return
             except (HTTPError, URLError, TimeoutError, ValueError) as error:
