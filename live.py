@@ -15,7 +15,7 @@ from urllib.request import Request, urlopen
 import json
 
 from bot import Bar, NY, scan, send_telegram
-from ema_vwap import indicators
+from ema_vwap import indicators, reclaim_signals
 
 DATA_URL = "https://data.alpaca.markets/v2/stocks/bars"
 CALENDAR_URL = "https://paper-api.alpaca.markets/v2/calendar"
@@ -58,13 +58,19 @@ def fetch_bars(args, now):
     params = dict(symbols=",".join(args.symbols), timeframe="1Min",
                   start=now.replace(hour=4, minute=0, second=0, microsecond=0).isoformat(),
                   end=now.isoformat(), feed=args.feed, adjustment="raw", limit=10000)
-    by_symbol = {symbol: {} for symbol in args.symbols}
+    return fetch_stock_bars(args.symbols, params, now)
+
+
+def fetch_stock_bars(symbols, params, cutoff):
+    by_symbol = {symbol: {} for symbol in symbols}
     while True:
         page = alpaca(DATA_URL, **params)
         for symbol, records in (page.get("bars") or {}).items():
             for row in records:
                 stamp = datetime.fromisoformat(row["t"].replace("Z", "+00:00")).astimezone(NY)
-                if stamp + timedelta(minutes=1) <= now:
+                closed = (stamp.date() < cutoff.date() if params["timeframe"] == "1Day"
+                          else stamp + timedelta(minutes=1) <= cutoff)
+                if closed:
                     by_symbol[symbol][stamp] = Bar(
                         stamp, row["o"], row["h"], row["l"], row["c"], row["v"]
                     )
@@ -159,6 +165,43 @@ def deliver_ema_vwap(symbol, bars, session, now, db, args, dry_run):
             log.info("EMA/VWAP simulation signal delivered for %s at %s", symbol, stamp)
 
 
+def daily_sma_levels(args, now):
+    today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    series = fetch_stock_bars(args.symbols, dict(
+        symbols=",".join(args.symbols), timeframe="1Day",
+        start=(today - timedelta(days=340)).isoformat(),
+        end=today.isoformat(), feed=args.feed, adjustment="split", limit=10000,
+    ), today)
+    return {symbol: tuple(sum(bar.close for bar in bars[-window:]) / window
+                          for window in (20, 200) if len(bars) >= window)
+            for symbol, bars in series.items() if len(bars) >= 200}
+
+
+def deliver_reclaims(symbol, bars, session, now, levels, db, args, dry_run):
+    start, end = session
+    regular = [bar for bar in bars if start <= bar.stamp.time() < end]
+    for minutes in (5, 15):
+        for stamp, side, entry, stop, tp1, rvol, rsi in reclaim_signals(regular, start, minutes, levels):
+            if not 0 <= (now - stamp).total_seconds() <= args.max_age:
+                continue
+            identifier = f"reclaim:{symbol}:{minutes}:{stamp.isoformat()}:{side}"
+            trail = "κάτω" if side == "LONG" else "πάνω"
+            message = (
+                f"ΠΡΟΣΟΜΟΙΩΣΗ · {symbol} {side} · EMA 9 / VWAP Reclaim ({minutes}m)\n"
+                f"{stamp:%H:%M} ET | RVOL {rvol:.2f}× | RSI {rsi:.1f} | {args.feed.upper()}\n"
+                f"Κλείσιμο επιβεβαίωσης ${entry:.4f} | Stop ${stop:.4f}\n"
+                f"TP1 ${tp1:.4f} (2R) · 50% και stop στο break-even.\n"
+                f"Υπόλοιπο 50% · έξοδος σε κλείσιμο {trail} από EMA 9."
+            )
+            if dry_run:
+                print(message)
+            elif not db.execute("SELECT 1 FROM sent WHERE id = ?", (identifier,)).fetchone():
+                send_telegram(message)
+                with db:
+                    db.execute("INSERT INTO sent VALUES (?)", (identifier,))
+                log.info("Reclaim alert delivered for %s %s (%sm)", symbol, side, minutes)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--once", action="store_true")
@@ -182,6 +225,7 @@ def main():
     with sqlite3.connect(":memory:" if cli.dry_run else path) as db:
         db.execute("CREATE TABLE IF NOT EXISTS sent (id TEXT PRIMARY KEY)")
         cached_date, session = None, None
+        levels_date, levels = None, {}
         log.info("Scanner started with %s symbols and %s feed.", len(args.symbols), args.feed)
         while True:
             now = datetime.now(NY)
@@ -211,6 +255,18 @@ def main():
                     if ema_enabled:
                         for symbol, series in bars.items():
                             deliver_ema_vwap(symbol, series, session, now, db, args, cli.dry_run)
+                        if levels_date != date:
+                            try:
+                                levels = daily_sma_levels(data_args, now)
+                                levels_date = date
+                                log.info("Daily SMA coverage: %d/%d symbols", len(levels), len(bars))
+                            except (HTTPError, URLError, TimeoutError, ValueError) as error:
+                                levels = {}
+                                log.warning("Reclaim scan skipped: daily bars unavailable (%s)",
+                                            getattr(error, "code", type(error).__name__))
+                        for symbol, series in bars.items():
+                            deliver_reclaims(symbol, series, session, now, levels.get(symbol, ()),
+                                             db, args, cli.dry_run)
                     log.info("Eligible recent setups: %d", len(plans))
                     sent = deliver(plans, db, args, cli.dry_run, now)
                     log.info("Telegram alerts delivered: %d%s", sent,
