@@ -30,6 +30,7 @@ jobs:
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       USD_PER_EUR: ${{ vars.USD_PER_EUR }}
+      EMA_VWAP_SIMULATION: ${{ vars.EMA_VWAP_SIMULATION }}
       ALPACA_FEED: iex
       SIGNAL_MAX_AGE_SECONDS: '420'
       STATE_DB: .scanner/alerts.sqlite3
