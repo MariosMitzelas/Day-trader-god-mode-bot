@@ -15,6 +15,7 @@ from urllib.request import Request, urlopen
 import json
 
 from bot import Bar, NY, scan, send_telegram
+from ema_vwap import indicators
 
 DATA_URL = "https://data.alpaca.markets/v2/stocks/bars"
 CALENDAR_URL = "https://paper-api.alpaca.markets/v2/calendar"
@@ -135,6 +136,29 @@ def deliver(plans, db, args, dry_run, now):
     return sent
 
 
+def deliver_ema_vwap(bars, session, now, db, args, dry_run):
+    start, end = session
+    regular = [bar for bar in bars if start <= bar.stamp.time() < end]
+    for stamp, close, ema, vwap, side in indicators(regular, start):
+        age = (now - stamp).total_seconds()
+        if not side or not 0 <= age <= args.max_age:
+            continue
+        identifier = f"ema-vwap:SPY:{stamp.isoformat()}:{side}"
+        message = (
+            f"ΠΡΟΣΟΜΟΙΩΣΗ · SPY {side} · EMA 9 / VWAP (3′)\n"
+            f"{stamp:%H:%M} ET | Feed {args.feed.upper()}\n"
+            f"SPY ${close:.2f} | EMA 9 ${ema:.2f} | VWAP ${vwap:.2f}\n"
+            "Σήμα στο υποκείμενο. Δεν επιλέχθηκε συμβόλαιο."
+        )
+        if dry_run:
+            print(message)
+        elif not db.execute("SELECT 1 FROM sent WHERE id = ?", (identifier,)).fetchone():
+            send_telegram(message)
+            with db:
+                db.execute("INSERT INTO sent VALUES (?)", (identifier,))
+            log.info("EMA/VWAP simulation signal delivered for SPY at %s", stamp)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--once", action="store_true")
@@ -144,6 +168,7 @@ def main():
     path = os.environ.get("STATE_DB", "alerts.sqlite3")
     try:
         args = config()
+        ema_enabled = os.environ.get("EMA_VWAP_SIMULATION", "0") == "1"
         for name in ("APCA_API_KEY_ID", "APCA_API_SECRET_KEY"):
             if not os.environ.get(name):
                 raise ValueError(f"Missing {name}")
@@ -171,14 +196,20 @@ def main():
                 if session and session[0] <= now.time() < session[1]:
                     # Wait a few seconds after each minute for the aggregate to arrive.
                     cutoff = (now - timedelta(seconds=5)).replace(second=0, microsecond=0)
-                    bars = fetch_bars(args, cutoff)
+                    data_args = SimpleNamespace(
+                        symbols=tuple(dict.fromkeys((*args.symbols, "SPY"))) if ema_enabled else args.symbols,
+                        feed=args.feed,
+                    )
+                    bars = fetch_bars(data_args, cutoff)
                     bar_count = sum(map(len, bars.values()))
                     latest = max((items[-1].stamp for items in bars.values() if items),
                                  default=None)
                     log.info("Alpaca bars: %d across %d/%d symbols; latest ET: %s",
                              bar_count, sum(bool(items) for items in bars.values()),
-                             len(args.symbols), latest.isoformat() if latest else "none")
-                    plans = recent_plans(bars, *session, now, args)
+                             len(data_args.symbols), latest.isoformat() if latest else "none")
+                    plans = recent_plans({s: bars[s] for s in args.symbols}, *session, now, args)
+                    if ema_enabled:
+                        deliver_ema_vwap(bars["SPY"], session, now, db, args, cli.dry_run)
                     log.info("Eligible recent setups: %d", len(plans))
                     sent = deliver(plans, db, args, cli.dry_run, now)
                     log.info("Telegram alerts delivered: %d%s", sent,
