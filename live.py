@@ -136,18 +136,18 @@ def deliver(plans, db, args, dry_run, now):
     return sent
 
 
-def deliver_ema_vwap(bars, session, now, db, args, dry_run):
+def deliver_ema_vwap(symbol, bars, session, now, db, args, dry_run):
     start, end = session
     regular = [bar for bar in bars if start <= bar.stamp.time() < end]
     for stamp, close, ema, vwap, side in indicators(regular, start):
         age = (now - stamp).total_seconds()
         if not side or not 0 <= age <= args.max_age:
             continue
-        identifier = f"ema-vwap:SPY:{stamp.isoformat()}:{side}"
+        identifier = f"ema-vwap:{symbol}:{stamp.isoformat()}:{side}"
         message = (
-            f"ΠΡΟΣΟΜΟΙΩΣΗ · SPY {side} · EMA 9 / VWAP (3′)\n"
+            f"ΠΡΟΣΟΜΟΙΩΣΗ · {symbol} {side} · EMA 9 / VWAP (3′)\n"
             f"{stamp:%H:%M} ET | Feed {args.feed.upper()}\n"
-            f"SPY ${close:.2f} | EMA 9 ${ema:.2f} | VWAP ${vwap:.2f}\n"
+            f"{symbol} ${close:.2f} | EMA 9 ${ema:.2f} | VWAP ${vwap:.2f}\n"
             "Σήμα στο υποκείμενο. Δεν επιλέχθηκε συμβόλαιο."
         )
         if dry_run:
@@ -156,7 +156,7 @@ def deliver_ema_vwap(bars, session, now, db, args, dry_run):
             send_telegram(message)
             with db:
                 db.execute("INSERT INTO sent VALUES (?)", (identifier,))
-            log.info("EMA/VWAP simulation signal delivered for SPY at %s", stamp)
+            log.info("EMA/VWAP simulation signal delivered for %s at %s", symbol, stamp)
 
 
 def main():
@@ -209,7 +209,8 @@ def main():
                              len(data_args.symbols), latest.isoformat() if latest else "none")
                     plans = recent_plans({s: bars[s] for s in args.symbols}, *session, now, args)
                     if ema_enabled:
-                        deliver_ema_vwap(bars["SPY"], session, now, db, args, cli.dry_run)
+                        for symbol, series in bars.items():
+                            deliver_ema_vwap(symbol, series, session, now, db, args, cli.dry_run)
                     log.info("Eligible recent setups: %d", len(plans))
                     sent = deliver(plans, db, args, cli.dry_run, now)
                     log.info("Telegram alerts delivered: %d%s", sent,

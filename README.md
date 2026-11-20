@@ -1,13 +1,13 @@
 # Day-trader-god-mode-bot
 
-## SPY EMA 9 / VWAP simulation
+## EMA 9 / VWAP simulation
 
 Set the GitHub Actions repository variable `EMA_VWAP_SIMULATION` to `1` to
 enable Telegram alerts on normal scans. For a Docker deployment use the same
-environment variable. SPY is added to the market-data request automatically.
+environment variable. The scanner covers the configured stock watchlist plus SPY.
 Telegram reports the crossover only. No broker orders are submitted.
 
-For offline replay use Python 3.10 or newer:
+For SPY offline replay use Python 3.10 or newer:
 
 ```bash
 python ema_vwap.py bars.csv
