@@ -1,0 +1,15 @@
+services:
+  scanner:
+    build: .
+    image: daytrader-bot:latest
+    container_name: daytrader-scanner
+    restart: unless-stopped
+    env_file: [.env]
+    environment:
+      STATE_DB: /app/state/alerts.sqlite3
+      LOG_JSON: "1"
+      METRICS_PORT: "9090"
+    volumes: [scanner-state:/app/state]
+    ports: ["127.0.0.1:9090:9090"]
+volumes:
+  scanner-state:
